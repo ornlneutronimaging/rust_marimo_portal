@@ -1,12 +1,14 @@
 use eframe::egui;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
+use std::time::Instant;
 
-const TOP_DIR: &str = "/Volumes/JeanHardDrive/SNS/VENUS";
+const TOP_DIR: &str = "/SNS/VENUS";
 
 fn main() -> eframe::Result {
     let mut options = eframe::NativeOptions::default();
-    options.viewport = options.viewport.with_inner_size(egui::vec2(500.0, 350.0));
+    options.viewport = options.viewport.with_inner_size(egui::vec2(500.0, 800.0));
     eframe::run_native(
         "Marimo Application Launcher",
         options,
@@ -17,9 +19,11 @@ fn main() -> eframe::Result {
 struct MyApp {
     folders: Vec<String>,
     selected: Option<usize>,
+    filter_text: String,
     py_files: Vec<String>,
     selected_py: Option<usize>,
     description: Option<String>,
+    launch_time: Option<Instant>,
 }
 
 impl MyApp {
@@ -27,9 +31,12 @@ impl MyApp {
         let mut folders = Vec::new();
         if let Ok(entries) = fs::read_dir(Path::new(TOP_DIR)) {
             for entry in entries.flatten() {
-                if entry.path().is_dir() {
+                let path = entry.path();
+                if path.is_dir() {
                     if let Some(name) = entry.file_name().to_str() {
-                        folders.push(name.to_string());
+                        if name.starts_with("IPTS-") && fs::read_dir(&path).is_ok() {
+                            folders.push(name.to_string());
+                        }
                     }
                 }
             }
@@ -38,9 +45,11 @@ impl MyApp {
         Self {
             folders,
             selected: None,
+            filter_text: String::new(),
             py_files: Vec::new(),
             selected_py: None,
             description: None,
+            launch_time: None,
         }
     }
 
@@ -56,11 +65,9 @@ impl MyApp {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.is_file() {
-                        if let Some(ext) = path.extension() {
-                            if ext == "py" {
-                                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                                    self.py_files.push(name.to_string());
-                                }
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name.ends_with("_marimo.py") {
+                                self.py_files.push(name.to_string());
                             }
                         }
                     }
@@ -109,7 +116,6 @@ impl eframe::App for MyApp {
         style.text_styles.insert(egui::TextStyle::Heading, egui::FontId::proportional(20.0));
         style.spacing.item_spacing = egui::vec2(8.0, 12.0);
         style.spacing.button_padding = egui::vec2(16.0, 8.0);
-        style.spacing.combo_height = 250.0;
         ctx.set_style(style);
 
         if self.selected_py.is_some() {
@@ -117,8 +123,28 @@ impl eframe::App for MyApp {
                 .frame(egui::Frame::new().fill(egui::Color32::BLACK).inner_margin(12.0))
                 .show(ctx, |ui| {
                     ui.vertical_centered(|ui| {
-                        if ui.button("Launch this application").clicked() {
-                            // TODO: launch command
+                        let launching = self.launch_time
+                            .map(|t| t.elapsed().as_secs() < 5)
+                            .unwrap_or(false);
+
+                        if launching {
+                            ui.add_enabled(false, egui::Button::new("\u{231b} Launching..."));
+                            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                        } else {
+                            if ui.button("Launch this application").clicked() {
+                                if let (Some(folder_idx), Some(py_idx)) = (self.selected, self.selected_py) {
+                                    let folder_name = &self.folders[folder_idx];
+                                    let ipts_number = folder_name.strip_prefix("IPTS-").unwrap_or(folder_name);
+                                    let py_name = self.py_files[py_idx].trim_end_matches(".py");
+                                    let script = format!(
+                                        "/SNS/VENUS/shared/software/scripts_for_users/start_ipts_{}_{}.sh",
+                                        ipts_number, py_name
+                                    );
+                                    println!("Launching: {}", script);
+                                    let _ = Command::new("bash").arg(&script).spawn();
+                                    self.launch_time = Some(Instant::now());
+                                }
+                            }
                         }
                     });
                 });
@@ -128,29 +154,52 @@ impl eframe::App for MyApp {
             ui.add_space(10.0);
 
             let label_width = 80.0;
-            let combo_width = ui.available_width() - label_width - 20.0;
+            let field_width = ui.available_width() - label_width - 20.0;
 
-            // IPTS selector
-            let prev_selected = self.selected;
-            let current_label = match self.selected {
-                Some(i) => self.folders[i].as_str(),
-                None => "Select a folder...",
-            };
+            // IPTS search filter
             ui.horizontal(|ui| {
                 ui.allocate_ui_with_layout(
                     egui::vec2(label_width, ui.spacing().interact_size.y),
                     egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| { ui.strong("IPTS"); },
+                    |ui| { ui.strong("Search"); },
                 );
-                egui::ComboBox::from_id_salt("ipts_combo")
-                    .selected_text(current_label)
-                    .width(combo_width)
-                    .show_ui(ui, |ui| {
-                        for (i, folder) in self.folders.iter().enumerate() {
-                            ui.selectable_value(&mut self.selected, Some(i), folder);
-                        }
-                    });
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.filter_text)
+                        .desired_width(field_width)
+                        .hint_text("Type to filter IPTS folders..."),
+                );
             });
+
+            // Always-visible IPTS list
+            let prev_selected = self.selected;
+            let filtered: Vec<(usize, &String)> = self.folders.iter().enumerate()
+                .filter(|(_, name)| {
+                    self.filter_text.is_empty()
+                        || name.to_lowercase().contains(&self.filter_text.to_lowercase())
+                })
+                .collect();
+
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgb(25, 25, 30))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 80, 100)))
+                .corner_radius(4.0)
+                .inner_margin(4.0)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .min_scrolled_height(350.0)
+                        .max_height(350.0)
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            for (i, folder) in &filtered {
+                                if ui.selectable_label(
+                                    self.selected == Some(*i),
+                                    *folder,
+                                ).clicked() {
+                                    self.selected = Some(*i);
+                                }
+                            }
+                        });
+                });
 
             if self.selected != prev_selected {
                 self.refresh_py_files();
@@ -178,7 +227,7 @@ impl eframe::App for MyApp {
                     );
                     egui::ComboBox::from_id_salt("py_combo")
                         .selected_text(current_py_label)
-                        .width(combo_width)
+                        .width(field_width)
                         .show_ui(ui, |ui| {
                             for (i, file) in self.py_files.iter().enumerate() {
                                 ui.selectable_value(&mut self.selected_py, Some(i), file);
@@ -204,7 +253,6 @@ impl eframe::App for MyApp {
                                 ui.label(desc);
                             });
                     }
-
                 }
             }
         });
