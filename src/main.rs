@@ -1,10 +1,22 @@
 use eframe::egui;
+use std::ffi::CString;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
 const TOP_DIR: &str = "/SNS/VENUS";
+
+/// Check if the current user has read+execute access to a directory
+/// using the POSIX access() syscall, which respects groups and ACLs.
+fn has_read_access(path: &Path) -> bool {
+    if let Some(path_str) = path.to_str() {
+        if let Ok(c_path) = CString::new(path_str) {
+            return unsafe { libc::access(c_path.as_ptr(), libc::R_OK | libc::X_OK) } == 0;
+        }
+    }
+    false
+}
 
 fn main() -> eframe::Result {
     let mut options = eframe::NativeOptions::default();
@@ -34,7 +46,7 @@ impl MyApp {
                 let path = entry.path();
                 if path.is_dir() {
                     if let Some(name) = entry.file_name().to_str() {
-                        if name.starts_with("IPTS-") && fs::read_dir(&path).is_ok() {
+                        if name.starts_with("IPTS-") && has_read_access(&path) {
                             folders.push(name.to_string());
                         }
                     }
@@ -133,15 +145,17 @@ impl eframe::App for MyApp {
                         } else {
                             if ui.button("Launch this application").clicked() {
                                 if let (Some(folder_idx), Some(py_idx)) = (self.selected, self.selected_py) {
-                                    let folder_name = &self.folders[folder_idx];
-                                    let ipts_number = folder_name.strip_prefix("IPTS-").unwrap_or(folder_name);
-                                    let py_name = self.py_files[py_idx].trim_end_matches(".py");
-                                    let script = format!(
-                                        "/SNS/VENUS/shared/software/scripts_for_users/start_ipts_{}_{}.sh",
-                                        ipts_number, py_name
-                                    );
-                                    println!("Launching: {}", script);
-                                    let _ = Command::new("bash").arg(&script).spawn();
+                                    let py_file = Path::new(TOP_DIR)
+                                        .join(&self.folders[folder_idx])
+                                        .join("shared")
+                                        .join("notebooks")
+                                        .join(&self.py_files[py_idx]);
+                                    let marimo_bin = "/SNS/VENUS/shared/software/git/marimo_notebooks/.pixi/envs/jupyter/bin/marimo";
+                                    println!("Launching: {} run {}", marimo_bin, py_file.display());
+                                    let _ = Command::new(marimo_bin)
+                                        .arg("run")
+                                        .arg(&py_file)
+                                        .spawn();
                                     self.launch_time = Some(Instant::now());
                                 }
                             }
